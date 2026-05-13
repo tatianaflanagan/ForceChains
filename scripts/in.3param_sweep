@@ -1,0 +1,205 @@
+# ---------------------------------------------
+# in.3param_sweep
+# Granular pile sweep over:
+#   mu       = sliding friction
+#   muroll   = rolling friction
+#   mutwist  = twisting friction
+#
+# Example run:
+#   lmp_serial -var mu 0.3 -var muroll 0.05 -var mutwist 0.10 -in in.3param_sweep
+# ---------------------------------------------
+
+# -----------------------------
+# Run control
+# -----------------------------
+variable irun_init   equal 1
+variable irun_pour   equal 400000
+variable irun_settle equal 300000
+variable image_every equal 1000
+variable total_run   equal ${irun_init}+${irun_pour}+${irun_settle}
+
+# -----------------------------
+# Sweep parameters
+# These defaults are overridden by -var on the command line.
+# -----------------------------
+variable mu       index 0.5
+variable muroll   index 0.05
+variable mutwist  index 0.05
+
+# -----------------------------
+# Material/contact parameters
+# -----------------------------
+variable xkk     equal 100000.0
+variable xkkt    equal 100000.0
+variable gamn    equal 40.0
+
+variable kroll   equal 100000.0
+variable groll   equal 40.0
+
+variable ktwist  equal 10000.0
+variable gtwist  equal 20.0
+
+# -----------------------------
+# System setup
+# -----------------------------
+atom_style sphere
+boundary p p fm
+newton off
+
+comm_style brick
+comm_modify cutoff 2.0 mode single vel yes
+
+region reg block 0.0 20.0 0.0 20.0 0.0 60.0 units box
+create_box 1 reg
+
+neighbor 0.4 bin
+neigh_modify delay 0
+
+# -----------------------------
+# Contact model
+# -----------------------------
+pair_style granular
+pair_coeff * * hooke ${xkk} ${gamn} &
+                tangential linear_history ${xkkt} 1.0 ${mu} &
+                rolling sds ${kroll} ${groll} ${muroll} &
+                twisting sds ${ktwist} ${gtwist} ${mutwist} &
+                damping mass_velocity
+
+timestep 0.0001
+
+# -----------------------------
+# Walls, gravity, integration
+# -----------------------------
+fix zaxis all wall/gran granular hooke ${xkk} ${gamn} &
+                tangential linear_history ${xkkt} 1.0 ${mu} &
+                rolling sds ${kroll} ${groll} ${muroll} &
+                twisting sds ${ktwist} ${gtwist} ${mutwist} &
+                damping mass_velocity &
+                zplane 0.0 NULL
+
+fix grav   all gravity 1.0 spherical 0.0 -180.0
+fix integr all nve/sphere
+fix damp   all viscous 0.2
+
+# -----------------------------
+# Particle insertion
+# -----------------------------
+region slab block 5.0 15.0 5.0 15.0 40.0 55.0 units box
+fix ins all pour 4000 1 4767548 region slab vol 0.12 100 &
+            diam one 1.0 dens 1.0 1.0
+
+# -----------------------------
+# Diagnostics
+# -----------------------------
+#For pair_style granular, LAMMPS defines:
+#p1 p2 p3 = tangential force components
+#p4 = tangential force magnitude
+#p5 p6 p7 = rolling torque components
+#p8 = rolling torque magnitude
+#p9 = twisting torque magnitude
+#p10 p11 p12 = center-to-center vector components
+
+compute c_pairs all property/local patom1 patom2
+compute c_forces all pair/local fx fy fz p1 p2 p3 force p4 p8 p9 cutoff radius
+
+compute c_ke all ke
+compute c_erot all erotate/sphere
+
+compute c_stress all stress/atom NULL
+compute c_stress_sum all reduce sum c_c_stress[1] c_c_stress[2] c_c_stress[3]
+
+compute c_contacts all contact/atom
+compute c_contacts_sum all reduce sum c_c_contacts
+
+compute c_diam all property/atom diameter
+compute c_voro all voronoi/atom
+
+variable pvol    atom PI*c_c_diam^3.0/6.0
+variable tpress  equal -(c_c_stress_sum[1]+c_c_stress_sum[2]+c_c_stress_sum[3])/(3*vol)
+variable pstress atom -(c_c_stress[1]+c_c_stress[2]+c_c_stress[3])/(3*v_pvol)
+
+variable vfac   equal atoms*PI/vol/6.0
+variable ztot   equal "ternary(atoms > 0, c_c_contacts_sum/atoms, 0.0)"
+variable zcoord atom c_c_contacts
+variable vfacl  atom c_c_voro
+
+# pile height
+variable ztop atom z+radius
+compute c_zmax all reduce max v_ztop
+
+# base radius proxy
+variable r atom sqrt((x-10.0)^2 + (y-10.0)^2)
+variable nearbase atom (z < 2.0)*v_r
+compute c_rmax all reduce max v_nearbase
+
+# safe angle estimate
+variable rmax_safe equal "ternary(c_c_rmax > 1.0e-6, c_c_rmax, 1.0e-6)"
+variable theta_rad equal atan(c_c_zmax/v_rmax_safe)
+variable theta_deg equal v_theta_rad*180.0/PI
+
+variable step_now equal step
+variable natoms_now equal atoms
+
+
+
+fix fprint all print 5000 "${step_now} ${natoms_now} ${vfac} ${tpress} ${ztot}" &
+          append vfac_press_mu${mu}_mur${muroll}_mut${mutwist}.dat &
+          title "step atoms vfac tpress ztot"
+
+# -----------------------------
+# Thermo
+# -----------------------------
+thermo_style custom step atoms temp ke c_c_ke c_c_erot press
+thermo_modify lost ignore norm no
+
+compute myTemp all temp
+compute_modify myTemp dynamic/dof yes
+thermo_modify temp myTemp
+
+thermo 5000
+
+# -----------------------------
+# Output
+# -----------------------------
+run ${irun_init}
+
+variable colors string "yellow orange red green blue purple"
+
+# Comment this block out for faster batch sweeps if you do not need images.
+#dump movie all image ${image_every} image_mu${mu}_mur${muroll}_mut${mutwist}.*.png c_c_contacts diameter &
+#                axes yes 0.8 0.02 view 70 -20 &
+#                zoom 1.6 adiam 1.2
+#dump_modify movie backcolor white pad 6 amap 0 5 sa 1 6 ${colors}
+
+dump dcor all custom ${total_run} dump_mu${mu}_mur${muroll}_mut${mutwist}.cor &
+     id type x y z radius ix iy iz
+
+#dump dlst all local ${total_run} dump_mu${mu}_mur${muroll}_mut${mutwist}.lst &
+#     index c_c_pairs[1] c_c_pairs[2] &
+#     c_c_forces[1] c_c_forces[2] c_c_forces[3] &
+#     c_c_forces[4] c_c_forces[5] c_c_forces[6] &
+#     c_c_forces[7] c_c_forces[8] c_c_forces[9] &
+#     c_c_forces[10] c_c_forces[11] c_c_forces[12]
+dump dlst all local ${total_run} dump_mu${mu}_mur${muroll}_mut${mutwist}.lst &
+     index c_c_pairs[1] c_c_pairs[2] &
+     c_c_forces[1] c_c_forces[2] c_c_forces[3] &
+     c_c_forces[4] c_c_forces[5] c_c_forces[6] &
+     c_c_forces[7] c_c_forces[8] c_c_forces[9] &
+     c_c_forces[10]
+
+dump dtrj all custom 100 dump_mu${mu}_mur${muroll}_mut${mutwist}.lammpstrj &
+     id type x y z vx vy vz omegax omegay omegaz
+
+# -----------------------------
+# Run stages
+# -----------------------------
+run ${irun_pour}
+unfix ins
+run ${irun_settle}
+
+run 0
+variable pileH equal c_c_zmax
+
+print "${mu} ${muroll} ${mutwist} ${pileH} ${theta_deg} ${ztot}" append pileheight_3param.dat screen yes
+write_restart restart_mu${mu}_mur${muroll}_mut${mutwist}.demo
+write_data    data_mu${mu}_mur${muroll}_mut${mutwist}.demo
